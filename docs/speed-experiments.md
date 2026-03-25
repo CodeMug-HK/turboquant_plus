@@ -83,7 +83,46 @@ The earlier attempt applied WHT in build_attn_mha AFTER the ggml_permute. But th
 
 ---
 
-## Experiment 4 (was 2): Reduced centroid lookup overhead
+## Experiment 4: Block-32 with graph WHT (THE BREAKTHROUGH)
+
+**Hypothesis:** With graph-side WHT, dequant no longer needs the 128-element butterfly. Block-128 forces the flash attention kernel to process 128 elements per block (nl=8 non-vec, nl=32 vec). Block-32 gives nl=2/8 — matching q4_0's parallelism.
+
+**Changes:**
+- QK_TURBO3: 128 → 32
+- Dequant functions: simple centroid lookup + norm scale (16 lines total)
+- Flash attention nl: 8→2 (non-vec), 32→8 (vec)
+
+**Results:**
+
+| Config | Prefill tok/s | PPL (32-chunk) | PPL (8-chunk) | vs q8_0 |
+|--------|-------------|----------------|---------------|---------|
+| turbo3 block-128 graph WHT | 2095 | 5.46 | 6.201 | 0.78x |
+| **turbo3 block-32 graph WHT** | **2747** | **5.46** | **6.193** | **1.02x** |
+| q8_0 baseline | 2694 | 5.41 | — | 1.00x |
+
+**Q8_0 PARITY ACHIEVED.** 4.6x compression at 102% of q8_0 prefill speed.
+
+**Status:** COMPLETE — committed
+
+---
+
+## Full Optimization Journey
+
+| Step | Prefill tok/s | vs q8_0 | Commit |
+|------|-------------|---------|--------|
+| fp32 WHT (start) | 739 | 0.27x | feature branch |
+| + fp16 WHT | 1074 | 0.40x | feature branch |
+| + half4 vectorized butterfly | 1411 | 0.52x | e4e0bde |
+| + pre-packed half4 signs | 1424 | 0.53x | 640e10e |
+| + graph-side WHT rotation | 2095 | 0.78x | 676f929 |
+| + block-32 | **2747** | **1.02x** | c84e124 |
+| q8_0 baseline | 2694 | 1.00x | — |
+
+**3.72x total speedup from first to last optimization.**
+
+---
+
+## Experiment 5 (was 4): Reduced centroid lookup overhead
 
 **Hypothesis:** The 3-bit index unpacking does 3 loads + 2 shifts + 1 OR per element. Pre-combining indices during quantize into a single packed array would reduce dequant to 1 load + mask.
 
