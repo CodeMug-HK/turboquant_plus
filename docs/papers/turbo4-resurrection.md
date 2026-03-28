@@ -305,8 +305,37 @@ buun's CUDA data confirms:
 
 **Conclusion:** The centroids are a solved problem. The hd128 fix is more bits (turbo4), not better centroids, not InnerQ, not CAT alignment. Beautifully simple.
 
+---
+
+## 10. The ISWA Bug — Cross-Model Testing Catches What Single-Model Testing Misses
+
+After turbo4 was working on Qwen, we built `turbo-quick-bench.sh` — a rapid smoke test (~5 min per model) that runs PPL, decode speed, and NIAH across q8\_0/turbo3/turbo4. Then we downloaded 7 models from 5 families and ran the bench on each.
+
+Gemma 2 27B showed PPL 13.7 trillion. Everything else passed.
+
+Initial investigation went down the wrong path — we assumed head\_dim=256 (Gemma's n\_embd/n\_head = 4608/32 = 144). But GGUF metadata showed K/V heads are explicitly 128. q4\_0 worked fine. Disabling flash attention didn't help. The issue was turbo-specific but not head\_dim-specific.
+
+The root cause was found by reading all 5 overloads of `build_attn` in `llama-graph.cpp`. The regular `build_attn` (used by Qwen, Llama, Phi, Mistral) includes turbo WHT Q rotation and V inverse rotation. The ISWA overload (used by Gemma 2, Cohere2, OLMo2, Gemma3N) didn't. K/V were WHT-rotated in SET\_ROWS but Q was unrotated. Attention computed `rotated_K × unrotated_Q` — complete garbage, 13.7 trillion PPL garbage.
+
+16 lines fixed it. PPL 13.7 trillion → 3.80.
+
+**Key lesson:** This bug would never have been found by testing on Qwen alone. The cross-model smoke testing methodology — downloading diverse models and running a quick bench on each — is what caught it. ISWA models were silently broken, producing normal-looking inference speed but nonsensical output.
+
+### Cross-Model Validation Results
+
+| Model | Family | q8\_0 PPL | turbo4 PPL | vs q8\_0 | NIAH |
+|-------|--------|----------|-----------|---------|------|
+| Qwen 35B MoE | Qwen | 6.11 | 6.13 | +0.23% | ✅ |
+| Qwen 27B Dense | Qwen | 6.89 | 6.94 | +0.72% | ✅ |
+| Phi-4 | Microsoft | 6.00 | 6.10 | +1.68% | ✅ |
+| Mistral Small 24B | Mistral | 6.09 | 6.12 | +0.46% | ✅ |
+| Gemma 2 27B (ISWA) | Google | 3.75 | 3.79 | +0.9% | — |
+| Llama 3.1 70B | Meta | 2.44 | 2.64 | +8.3% | ✅ |
+
+---
+
 **What's next:**
-- KLD and NIAH characterization
+- Head-dim-dependent centroid codebooks (d=128 and d=256)
 - Asymmetric K/V (turbo3-K + turbo4-V — blocked by cross-type FA kernel instantiation)
 - Upstream integration
 - CUDA port
