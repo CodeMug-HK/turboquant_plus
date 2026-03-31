@@ -1,6 +1,8 @@
 # TurboQuant+
 
-Implementation of [TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) (ICLR 2026) — KV cache compression for local LLM inference, with planned extensions beyond the paper.
+> ### [Getting Started Guide](docs/getting-started.md) | [Configuration Recommendations](docs/turboquant-recommendations.md) | [llama.cpp Fork](https://github.com/TheTom/llama-cpp-turboquant)
+
+Implementation of [TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) (ICLR 2026) with extensions beyond the paper. KV cache compression for local LLM inference.
 
 > **Why "Plus"?** The base TurboQuant paper is v1. I have ideas for improvements coming post-v1 — adaptive bit allocation, temporal decay compression, expert-aware MoE compression, and more. The "plus" is what comes next.
 
@@ -15,8 +17,6 @@ Compresses transformer KV cache **3.8–6.4x** using PolarQuant + Walsh-Hadamard
 **Not TurboQuant-specific** — Sparse V was validated across q8_0, q4_0, and turbo3 KV formats.
 
 Validated end-to-end from 1.5B to **104B** on M5 Max via llama.cpp Metal. **104B at 128K context on a MacBook** with turbo3 (PPL 4.024, 74 GB peak memory).
-
-**New here?** See the [Getting Started Guide](docs/getting-started.md) for build instructions, config selection, and how to benchmark.
 
 ## Status: v1 Complete, Speed Optimized, Community-Tested
 
