@@ -1,10 +1,12 @@
 # TurboQuant Configuration Recommendations
 
-Practical guidance for choosing TurboQuant settings based on your model, weight quantization, and hardware. Based on validated Metal testing across M2 Pro and M5 Max.
+Practical guidance for choosing TurboQuant settings based on your model, weight quantization, and hardware. Based on validated testing across Metal (M1 through M5), CUDA (RTX 3080 Ti through Blackwell), and HIP (AMD RDNA 4).
 
-> **Backend scope:** All validation in this document was performed on Metal (Apple Silicon). CUDA ports exist via community forks but asymmetric q8_0 × turbo has not been independently validated on CUDA.
+> **Multi-backend validated:** Metal (Apple Silicon), CUDA (NVIDIA), and HIP (AMD) all produce consistent quality results. Speed characteristics vary by backend. CUDA decode is faster than q8_0 on some models (dusterbloom fused MMA FA). Metal prefill beats q8_0 at 32K+ context on 70B.
 
-> **Speed note:** Asymmetric q8_0-K + turbo-V is a quality/robustness rescue, not a speed optimization over q8_0/q8_0. K stays uncompressed, so you trade some decode throughput for quality safety on sensitive models. If symmetric turbo works on your model, use it — it's faster.
+> **Sparse V:** Enabled by default on all Metal builds. Skips V dequant for negligible attention weights. No PPL impact, +22.8% decode on MoE at 32K. Opt-out: `TURBO_SPARSE_V=0`.
+
+> **Block size 128:** Now the default. turbo3 achieves 5.12x compression (was 4.57x at block_size=32) with zero quality cost. Validated on Metal and CUDA (PR #32 fix).
 
 ## Validated Good
 
@@ -16,9 +18,11 @@ These configurations produce healthy PPL in current testing:
 | Q8_0 weights, any size | `-ctk turbo3 -ctv turbo3` | phi-4 +4.2%, 35B MoE +1.1% |
 | Q8_0 weights, any size | `-ctk q8_0 -ctv turbo4` | phi-4 +0.3% |
 | Q8_0 weights, any size | `-ctk q8_0 -ctv turbo3` | phi-4 +1.1% |
-| Q4_K_M, larger models (24B+) | `-ctk turbo3 -ctv turbo3` | Mistral-24B PPL 4.99 (single model tested) |
-| Q4_K_M, tested sensitive models | `-ctk q8_0 -ctv turbo4` | Qwen2.5-7B +1.0% |
+| Q4_K_M, larger models (24B+) | `-ctk turbo3 -ctv turbo3` | Mistral-24B PPL 4.99, Llama-70B PPL 3.629 (+11.4%) |
+| Q4_K_M, larger models (70B) | `-ctk turbo4 -ctv turbo4` | Llama-70B PPL 3.461 (+6.3%) |
+| Q4_K_M, tested sensitive models | `-ctk q8_0 -ctv turbo4` | Qwen2.5-7B +1.0% (Metal, CUDA, AMD all confirmed) |
 | Q4_K_M, tested sensitive models | `-ctk q8_0 -ctv turbo3` | Qwen2.5-7B +2.0% |
+| Q4_K_M, 70B | `-ctk q8_0 -ctv turbo2` | Llama-70B +9.5% (asymmetric rescue) |
 
 ## Validated Risky
 
@@ -30,24 +34,23 @@ These configurations produce catastrophic PPL in at least one tested model:
 | Q4_K_M, Qwen2.5-7B | `-ctk turbo3 -ctv turbo3` | PPL 3556 |
 | Q4_K_M, Qwen2.5-1.5B | `-ctk turbo3 -ctv turbo3` | PPL 8641+ on both M5 and M2 |
 
-Note: symmetric turbo on Q4_K_M is not universally broken. Mistral-24B Q4_K_M handles it fine. Model family and size both matter.
+Note: symmetric turbo on Q4_K_M is not universally broken. Mistral-24B and Llama-70B Q4_K_M handle it fine. Model family and size both matter. Qwen2.5 is consistently sensitive; Llama and Mistral are tolerant.
 
 ## Experimental
 
-These configurations showed promising results in current Metal tests but have less validation depth:
+These configurations showed promising results but have less validation depth:
 
 | Model class | Config | Evidence |
 |-------------|--------|----------|
-| Q4_K_M, tested sensitive models | `-ctk q8_0 -ctv turbo2` | Qwen2.5-7B +5.1% — promising but less validated than turbo4-V/turbo3-V |
-| Q8_0 weights | `-ctk q8_0 -ctv turbo2` | phi-4 +3.1% — limited testing |
+| Q4_K_M, tested sensitive models | `-ctk q8_0 -ctv turbo2` | Qwen2.5-7B +5.1% |
+| Q8_0 weights | `-ctk q8_0 -ctv turbo2` | phi-4 +3.1% |
+| Q4_K_M, Qwen2.5-7B (AMD) | `-ctk q8_0 -ctv turbo3` | NaN on HIP (Metal gets +2.0%). HIP-specific, under investigation |
 
-turbo2-V showed promising results in current Metal tests, but has less validation than turbo4-V and turbo3-V. Treat it as experimental.
+### Boundary V (auto-enabled for turbo2-V)
 
-### Boundary V (experimental, internal mode LA-V7)
+A layer-aware V compression strategy that protects the first 2 + last 2 layers with q8_0-V while compressing all remaining layers with turbo2-V. **Auto-enabled when `-ctv turbo2` is set** on recent builds. Opt-out: `TURBO_LAYER_ADAPTIVE=0`. On older builds, activate with `TURBO_LAYER_ADAPTIVE=7`.
 
-A layer-aware V compression strategy that protects boundary layers (first 2 + last 2) with q8_0-V while compressing all remaining layers with turbo2-V. Activated via `TURBO_LAYER_ADAPTIVE=7` env var.
-
-In current Metal testing across 4 models (phi-4-Q8_0, Qwen2.5-7B Q4_K_M, Qwen3.5-35B MoE Q8_0, Qwen3.5-27B Dense Q8_0), Boundary V consistently recovers 37-91% of the turbo2→turbo3 quality gap at effective compression between turbo2 and turbo3 (closer to turbo2 on deeper models). The benefit is largest on deep models where 4 boundary layers is a small fraction of total layers.
+Validated across 4 models on Metal. Consistently recovers 37-91% of the turbo2-to-turbo3 quality gap. Benefit scales with model depth.
 
 | Model | Layers | turbo2 PPL | Boundary V PPL | turbo3 PPL | Quality recovered |
 |-------|--------|-----------|---------------|-----------|-------------------|
@@ -56,42 +59,22 @@ In current Metal testing across 4 models (phi-4-Q8_0, Qwen2.5-7B Q4_K_M, Qwen3.5
 | Qwen3.5-35B MoE | 64 | 5.257 | 5.148 | 5.137 | 91% |
 | Qwen3.5-27B Dense | 36 | 6.534 | 6.423 | 6.273 | 42% |
 
-Validated at 512 and 8K context. NIAH retrieval passed. No speed penalty. Effective V bits/val is 2.9-3.4 depending on model depth (between turbo2 and turbo3).
+Validated at 512 and 8K context. NIAH retrieval passed. No speed penalty. Independently validated by @Corianas_ on NanoGPT.
 
-Effective V compression is between turbo2 and turbo3, closer to turbo2 on deeper models.
-
-**How to try it:**
-
-```bash
-# Boundary V — boundary layers q8_0-V, rest turbo2-V
-TURBO_LAYER_ADAPTIVE=7 llama-server -m model.gguf -ctk q8_0 -ctv turbo2 -fa 1
-
-# Baseline comparison: uniform turbo2-V
-llama-server -m model.gguf -ctk q8_0 -ctv turbo2 -fa 1
-
-# Baseline comparison: uniform turbo3-V
-llama-server -m model.gguf -ctk q8_0 -ctv turbo3 -fa 1
-
-# PPL validation
-TURBO_LAYER_ADAPTIVE=7 llama-perplexity -m model.gguf -ngl 99 -fa 1 \
-  -ctk q8_0 -ctv turbo2 -f wikitext-2-raw/wiki.test.raw -c 512 --chunks 4
-```
-
-Expected result: PPL better than uniform `q8_0/turbo2`, usually behind uniform `q8_0/turbo3`.
-
-Treat as experimental. Not yet validated at 32K+ context or on CUDA. See [Layer-Aware V Compression](papers/layer-aware-v-compression.md) for the full writeup.
+See [Layer-Aware V Compression](papers/layer-aware-v-compression.md) for the full writeup.
 
 ## Recommended Starting Points
 
 | Your situation | Start with | Why |
 |---------------|------------|-----|
 | Q8_0+ weights | `-ctk turbo4 -ctv turbo4` | Best quality/compression balance |
-| Q8_0+ weights, need more compression | `-ctk turbo3 -ctv turbo3` | +4% PPL, 4.6x compression |
+| Q8_0+ weights, need more compression | `-ctk turbo3 -ctv turbo3` | +4% PPL, 5.12x compression |
 | Q4_K_M, unknown model | `-ctk q8_0 -ctv turbo4` | Safe default, V still compressed |
-| Q4_K_M, validated large model | `-ctk turbo3 -ctv turbo3` | If you've confirmed PPL is healthy |
-| Maximum V compression | `-ctk q8_0 -ctv turbo2` | +5% PPL, experimental (see above) |
+| Q4_K_M, validated large model (24B+) | `-ctk turbo3 -ctv turbo3` | If you've confirmed PPL is healthy |
+| Q4_K_M, 70B | `-ctk turbo4 -ctv turbo4` | +6.3% PPL, symmetric works on Llama-70B |
+| Maximum V compression | `-ctk q8_0 -ctv turbo2` | +5-9.5% PPL, Boundary V auto-enabled |
 
-**Important framing:** Asymmetric q8_0-K + turbo-V is a **quality/robustness rescue**, not a speed optimization. You trade some decode throughput (K is uncompressed) for quality safety on sensitive models. If your model works fine with symmetric turbo, use symmetric — it's faster.
+**Important framing:** Asymmetric q8_0-K + turbo-V is a **quality/robustness rescue**, not a speed optimization. You trade some decode throughput (K is uncompressed) for quality safety on sensitive models. If your model works fine with symmetric turbo, use symmetric.
 
 ## Why K Precision Matters More Than V
 
@@ -107,9 +90,11 @@ This is why asymmetric `-ctk q8_0 -ctv turbo3` can rescue models where symmetric
 
 ## Tested Configurations
 
-All results from Metal flash attention on Apple Silicon. PPL measured on wikitext-2-raw (512 context, 4 chunks) unless noted.
+### Metal (Apple Silicon)
 
-### phi-4-14B (Q8_0 weights) — healthy across all configs
+All results from Metal flash attention. PPL measured on wikitext-2-raw (512 context, 4 chunks) unless noted.
+
+#### phi-4-14B (Q8_0 weights) — healthy across all configs
 
 | K | V | M5 PPL | M2 PPL | vs q8_0 | Status |
 |---|---|--------|--------|---------|--------|
@@ -122,7 +107,7 @@ All results from Metal flash attention on Apple Silicon. PPL measured on wikitex
 
 Cross-hardware matched: M2 Pro and M5 Max produce equivalent results.
 
-### Qwen2.5-7B-Instruct (Q4_K_M weights) — sensitive to symmetric turbo, rescued by asymmetric K/V
+#### Qwen2.5-7B-Instruct (Q4_K_M weights) — sensitive to symmetric turbo, rescued by asymmetric K/V
 
 | K | V | M5 PPL | M2 PPL | vs q8_0 | Status |
 |---|---|--------|--------|---------|--------|
@@ -135,26 +120,106 @@ Cross-hardware matched: M2 Pro and M5 Max produce equivalent results.
 
 Cross-hardware matched: both machines show identical quality patterns.
 
-### Qwen3.5-35B-A3B MoE (Q8_0 weights) — healthy
+#### Llama-3.1-70B-Instruct (Q4_K_M weights, M5 Max 128GB) — tolerates symmetric turbo
+
+| K | V | PPL | vs q8_0 | Status |
+|---|---|-----|---------|--------|
+| q8_0 | q8_0 | 3.257 | baseline | healthy |
+| q8_0 | turbo4 | 3.301 | +1.3% | healthy |
+| q8_0 | turbo3 | 3.325 | +2.1% | healthy |
+| q8_0 | turbo2 | 3.568 | +9.5% | healthy |
+| turbo4 | turbo4 | 3.461 | +6.3% | healthy |
+| turbo3 | turbo3 | 3.629 | +11.4% | usable |
+| turbo2 | turbo2 | 5.161 | +58.5% | degraded |
+
+Asymmetric rescue works: q8_0/turbo2 = +9.5% vs symmetric turbo2/turbo2 = +58.5%. 6x improvement in quality degradation.
+
+Long context PPL (wikitext-2-raw):
+
+| K | V | Context | PPL |
+|---|---|---------|-----|
+| q8_0 | q8_0 | 8K | 3.617 |
+| q8_0 | turbo4 | 8K | 3.639 |
+| q8_0 | turbo3 | 8K | 3.653 |
+| turbo3 | turbo3 | 32K | 4.839 |
+| q8_0 | q8_0 | 48K | 3.575 |
+| turbo3 | turbo3 | 48K | 4.019 |
+
+NIAH: 30/30 perfect (turbo3 = q8_0, 5 depths x 3 context lengths). See [70B stress test](papers/70b-m5-max-stress-test.md).
+
+#### Qwen3.5-35B-A3B MoE (Q8_0 weights) — healthy
 
 | K | V | M5 PPL | Status |
 |---|---|--------|--------|
 | turbo3 | turbo3 | 5.130 | healthy |
 | turbo4 | turbo4 | 5.078 | healthy |
 
-### Qwen3.5-27B Dense (Q8_0 weights) — healthy
+#### Qwen3.5-27B Dense (Q8_0 weights) — healthy
 
 | K | V | M5 PPL | Status |
 |---|---|--------|--------|
 | turbo3 | turbo3 | 6.339 | healthy |
 
-### Mistral-Small-24B-Instruct (Q4_K_M weights) — healthy at this size
+#### Mistral-Small-24B-Instruct (Q4_K_M weights) — healthy at this size
 
 | K | V | M5 PPL | Status |
 |---|---|--------|--------|
 | turbo3 | turbo3 | 4.987 | healthy |
 
 This shows Q4_K_M is not universally incompatible with symmetric turbo. The 24B model has enough capacity to absorb the quantization stacking that breaks the 7B model.
+
+### CUDA (NVIDIA)
+
+Community-validated on RTX 3080 Ti, RTX 3090, RTX 4090, RTX 5090, and DGX Spark (Blackwell sm_121).
+
+#### seanrasch — Qwen3.5-4B Q4_K_M (RTX 3090, block_size=128)
+
+| K | V | PPL | vs fp16 | Status |
+|---|---|-----|---------|--------|
+| fp16 | fp16 | 10.037 | baseline | — |
+| q8_0 | turbo4 | 10.124 | +0.9% | healthy |
+| q8_0 | turbo3 | 10.163 | +1.3% | healthy |
+| turbo3 | turbo3 | 10.247 | +2.1% | healthy |
+| q8_0 | turbo2 | 10.568 | +5.3% | healthy |
+
+Qwen3.5 hybrid architecture handles symmetric turbo without the blowup seen on Qwen2.x.
+
+#### dusterbloom — Decode Speed (RTX 3090, block_size=128, fused MMA FA)
+
+| Model | Decode vs q8_0 |
+|-------|---------------|
+| Gemma-3-12B | +7.3% faster |
+| Qwen3.5-35B MoE | +4.2% faster |
+| Nemotron-9B | +3.4% faster |
+| Qwen3.5-9B | +0.8% faster |
+
+Prefill near parity (-0.3% to +2.5% at pp8192).
+
+#### Char__Bob — Mistral-Small-24B (RTX 3090)
+
+q8_0 OOMs at 128K on 3090. turbo3 enables 128K (18,430 MiB fits). Decode flat ~43 t/s.
+
+#### seanrasch — NIAH (RTX 3080 Ti)
+
+Qwen3.5-9B turbo3/turbo3: 33/33 (100%), matches f16.
+
+### HIP (AMD)
+
+First AMD validation. RX 9070 XT (RDNA 4, gfx1201), Windows 11, HIP SDK 7.1. First attempt, no tuning.
+
+#### Qwen2.5-7B-Instruct (Q4_K_M weights)
+
+| K | V | PPL | vs q8_0 | Status |
+|---|---|-----|---------|--------|
+| q8_0 | q8_0 | 7.794 | baseline | OK |
+| q8_0 | turbo4 | 7.876 | +1.0% | recommended |
+| q8_0 | turbo3 | NaN | — | HIP-specific issue |
+| turbo4 | turbo4 | 401.4 | catastrophic | Q4_K_M sensitivity |
+| turbo3 | turbo3 | 81,277 | catastrophic | Q4_K_M sensitivity |
+
+Asymmetric q8_0/turbo4 confirmed on AMD. Symmetric Q4_K_M failure consistent across all three GPU vendors. q8_0/turbo3 NaN is HIP-specific (Metal gets +2.0%). No speed penalty on working configs.
+
+See [Windows RDNA 4 Setup Guide](windows-rdna4-setup.md) for build instructions and 9 gotchas.
 
 ## Practical Guidance
 
@@ -172,7 +237,7 @@ llama-server -m model-Q8_0.gguf -ctk turbo3 -ctv turbo3 -fa 1
 
 ### Low-bit base weights (Q4_K_M) on sensitive models
 
-In current testing, Qwen2.5-7B Q4_K_M fails catastrophically with symmetric turbo but is rescued by asymmetric K/V. Not all Q4_K_M models are sensitive to this — Mistral-24B Q4_K_M works fine with symmetric turbo. If you're unsure, start with asymmetric:
+Qwen2.5-7B Q4_K_M fails catastrophically with symmetric turbo but is rescued by asymmetric K/V. Not all Q4_K_M models are sensitive. If unsure, start asymmetric:
 
 ```bash
 # Recommended: near-baseline quality with V compression
@@ -181,13 +246,13 @@ llama-server -m model-Q4_K_M.gguf -ctk q8_0 -ctv turbo4 -fa 1
 # More V compression, still good (+2% PPL)
 llama-server -m model-Q4_K_M.gguf -ctk q8_0 -ctv turbo3 -fa 1
 
-# Maximum V compression (+5% PPL, experimental)
+# Maximum V compression (+5-9.5% PPL, Boundary V auto-enabled)
 llama-server -m model-Q4_K_M.gguf -ctk q8_0 -ctv turbo2 -fa 1
 ```
 
 ### Low-bit base weights (Q4_K_M) on larger or less sensitive models
 
-In current testing, symmetric turbo3 works on Mistral-24B Q4_K_M (PPL 4.99). Some model families tolerate the quantization stacking. Validate on your specific model, and fall back to asymmetric if quality degrades:
+Symmetric turbo3 works on Mistral-24B Q4_K_M (PPL 4.99) and Llama-70B Q4_K_M (PPL 3.629). Validate on your specific model:
 
 ```bash
 # Try symmetric first on large Q4_K_M models
@@ -208,21 +273,22 @@ llama-server -m model.gguf -ctk q8_0 -ctv turbo4 -fa 1
 
 ## Block Size
 
-The default storage block size for turbo3 and turbo2 is 32 elements. Testing with block_size=128 shows identical PPL while improving turbo3 compression from 4.57x to 5.12x.
+The default storage block size is 128 elements (changed from 32). turbo3 achieves 5.12x compression (vs 4.57x at block_size=32) with zero quality cost.
 
-- **turbo3 (asymmetric q8_0-K + turbo3-V):** Validated across 3 architectures (dense, dense Qwen, hybrid MoE), 3 context lengths (512, 8K, 32K), and 2 hardware platforms (M5 Max, M2 Pro). Zero PPL regression, no speed regression on M5.
-- **turbo3 (symmetric turbo3-K + turbo3-V):** Validated on phi-4 dense and Qwen3.5-35B MoE (M5 Max, 512 context). PPL identical at block 32 vs 128.
-- **turbo2 (asymmetric q8_0-K + turbo2-V):** Validated on phi-4 Q8_0 (M5) and Qwen2.5-7B Q4_K_M (M5 + M2). PPL identical at block 32 vs 128.
-- **NIAH:** 3/3 pass at block_size=128 (phi-4, symmetric turbo3, 4K context). Block128-only run, not strict A/B.
+Validated on:
+- **Metal:** 3 architectures (dense, dense Qwen, hybrid MoE), 3 context lengths (512, 8K, 32K), 2 Apple Silicon platforms (M5 Max, M2 Pro). Both symmetric and asymmetric paths.
+- **CUDA:** Validated via PR #32 fix (warp-to-block mapping for block_size=128). PPL identical on RTX 3090 sm_86.
+- **NIAH:** 3/3 pass at block_size=128 (phi-4, symmetric turbo3, 4K context).
 
-Additionally, on the tested M2 Pro setup (Qwen2.5-1.5B, `q8_0-K + turbo3-V`), block_size=128 improved decode speed by 3-7% across 512 to 16K context. This gain was not observed on M5 Max and may be specific to bandwidth-constrained Apple Silicon. Single-model result; may not generalize.
+On M2 Pro (Qwen2.5-1.5B, `q8_0-K + turbo3-V`), block_size=128 improved decode speed by 3-7%. This gain was not observed on M5 Max and may be specific to bandwidth-constrained hardware.
 
-Community retesting is encouraged on CUDA / non-Apple backends and additional model families once the updated default lands. See [block size study](papers/block-size-experiment.md) for the full data.
+See [block size study](papers/block-size-experiment.md) for the full data.
 
 ## Notes and Caveats
 
-- **Backend scope:** All validation in this document was performed on Metal (Apple Silicon). CUDA ports exist via community forks (spiritbuun, signalnine) but asymmetric q8_0 × turbo has not been independently validated on CUDA.
-- **Model sensitivity varies:** The Qwen2.5-7B Q4_K_M failure does not generalize to all Q4_K_M models. Mistral-24B Q4_K_M works fine with symmetric turbo. Test before deploying on new model families.
-- **turbo2 as V cache:** turbo2-V showed promising results in current Metal tests (+5.1% PPL on Qwen2.5-7B Q4_K_M, +3.1% on phi-4 Q8_0), but has less validation than turbo4-V and turbo3-V. Treat as experimental.
-- **Asymmetric K/V is new:** Mixed q8_0 × turbo kernel support was added in the 2026-03-29 asymmetric K/V update. Earlier builds do not support these configurations.
-- **PPL is measured at 512 context with 4 chunks.** Long-context behavior may differ; validate at your target context length.
+- **Multi-backend:** Metal, CUDA, and HIP all validated. Asymmetric q8_0-K + turbo4-V confirmed across all three GPU vendors on Qwen2.5-7B Q4_K_M.
+- **Model sensitivity varies:** Qwen2.5 is consistently sensitive to symmetric turbo on Q4_K_M. Llama, Mistral, and Qwen3.5 tolerate it. Test before deploying on new model families.
+- **turbo2 as V cache:** turbo2-V with Boundary V auto-enabled gives +5-9.5% PPL depending on model. Boundary V recovers 37-91% of the quality gap.
+- **PPL is measured at 512 context with 4 chunks unless noted.** Long-context PPL validated up to 48K on Llama-70B.
+- **70B at 48K context:** Confirmed on M5 Max 128GB. turbo3 prefill is 7.4% faster than q8_0 at 32K. Hard wall at ~49K context due to Metal compute buffer limitation (not TurboQuant-specific). See [70B stress test](papers/70b-m5-max-stress-test.md).
+- **Community:** 30+ testers across M1/M2/M3/M5 Mac, RTX 3080 Ti/3090/4090/5090, DGX Spark Blackwell, AMD RX 9070 XT.
