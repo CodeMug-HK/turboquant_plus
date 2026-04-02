@@ -454,7 +454,7 @@ for i in range(4, n_layers - 4):
   -p 512 -n 128 -ctk q8_0 -ctv turbo4
 ```
 
-Implementation: [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant). Metal backend. Not yet upstreamed. See repo for current branch.
+Implementation: [PR #45](https://github.com/TheTom/llama-cpp-turboquant/pull/45) on branch `pr/tq4-weight-compression`. Metal backend only — CUDA port needed before merge. See [getting started](https://github.com/TheTom/turboquant_plus/blob/main/docs/getting-started.md) for usage.
 
 ---
 
